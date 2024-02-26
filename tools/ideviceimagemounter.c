@@ -23,6 +23,8 @@
 #include <config.h>
 #endif
 
+#define TOOL_NAME "ideviceimagemounter"
+
 #include <stdlib.h>
 #define _GNU_SOURCE 1
 #define __USE_GNU 1
@@ -44,12 +46,13 @@
 #include <libimobiledevice/notification_proxy.h>
 #include <libimobiledevice/mobile_image_mounter.h>
 #include <asprintf.h>
-#include "common/utils.h"
+#include <plist/plist.h>
 
 static int list_mode = 0;
+static int use_network = 0;
 static int xml_mode = 0;
-static char *udid = NULL;
-static char *imagetype = NULL;
+static const char *udid = NULL;
+static const char *imagetype = NULL;
 
 static const char PKG_PATH[] = "PublicStaging";
 static const char PATH_PREFIX[] = "/private/var/mobile/Media";
@@ -59,62 +62,70 @@ typedef enum {
 	DISK_IMAGE_UPLOAD_TYPE_UPLOAD_IMAGE
 } disk_image_upload_type_t;
 
-static void print_usage(int argc, char **argv)
+static void print_usage(int argc, char **argv, int is_error)
 {
-	char *name = NULL;
-
-	name = strrchr(argv[0], '/');
-	printf("Usage: %s [OPTIONS] IMAGE_FILE IMAGE_SIGNATURE_FILE\n\n", (name ? name + 1: argv[0]));
-	printf("Mounts the specified disk image on the device.\n\n");
-	printf("  -u, --udid UDID\ttarget specific device by UDID\n");
-	printf("  -l, --list\t\tList mount information\n");
-	printf("  -t, --imagetype\tImage type to use, default is 'Developer'\n");
-	printf("  -x, --xml\t\tUse XML output\n");
-	printf("  -d, --debug\t\tenable communication debugging\n");
-	printf("  -h, --help\t\tprints usage information\n");
-	printf("\n");
-	printf("Homepage: <" PACKAGE_URL ">\n");
+	char *name = strrchr(argv[0], '/');
+	fprintf(is_error ? stderr : stdout, "Usage: %s [OPTIONS] IMAGE_FILE IMAGE_SIGNATURE_FILE\n", (name ? name + 1: argv[0]));
+	fprintf(is_error ? stderr : stdout,
+		"\n"
+		"Mounts the specified disk image on the device.\n"
+		"\n"
+		"OPTIONS:\n"
+		"  -u, --udid UDID       target specific device by UDID\n"
+		"  -n, --network         connect to network device\n"
+		"  -l, --list            List mount information\n"
+		"  -t, --imagetype TYPE  Image type to use, default is 'Developer'\n"
+		"  -x, --xml             Use XML output\n"
+		"  -d, --debug           enable communication debugging\n"
+		"  -h, --help            prints usage information\n"
+		"  -v, --version         prints version information\n"
+		"\n"
+		"Homepage:    <" PACKAGE_URL ">\n"
+		"Bug Reports: <" PACKAGE_BUGREPORT ">\n"
+	);
 }
 
 static void parse_opts(int argc, char **argv)
 {
 	static struct option longopts[] = {
-		{"help", no_argument, NULL, 'h'},
-		{"udid", required_argument, NULL, 'u'},
-		{"list", no_argument, NULL, 'l'},
-		{"imagetype", required_argument, NULL, 't'},
-		{"xml", no_argument, NULL, 'x'},
-		{"debug", no_argument, NULL, 'd'},
-		{NULL, 0, NULL, 0}
+		{ "help",      no_argument,       NULL, 'h' },
+		{ "udid",      required_argument, NULL, 'u' },
+		{ "network",   no_argument,       NULL, 'n' },
+		{ "list",      no_argument,       NULL, 'l' },
+		{ "imagetype", required_argument, NULL, 't' },
+		{ "xml",       no_argument,       NULL, 'x' },
+		{ "debug",     no_argument,       NULL, 'd' },
+		{ "version",   no_argument,       NULL, 'v' },
+		{ NULL, 0, NULL, 0 }
 	};
 	int c;
 
 	while (1) {
-		c = getopt_long(argc, argv, "hu:lt:xd", longopts, NULL);
+		c = getopt_long(argc, argv, "hu:lt:xdnv", longopts, NULL);
 		if (c == -1) {
 			break;
 		}
 
 		switch (c) {
 		case 'h':
-			print_usage(argc, argv);
+			print_usage(argc, argv, 0);
 			exit(0);
 		case 'u':
 			if (!*optarg) {
 				fprintf(stderr, "ERROR: UDID must not be empty!\n");
-				print_usage(argc, argv);
+				print_usage(argc, argv, 1);
 				exit(2);
 			}
-			free(udid);
-			udid = strdup(optarg);
+			udid = optarg;
+			break;
+		case 'n':
+			use_network = 1;
 			break;
 		case 'l':
 			list_mode = 1;
 			break;
 		case 't':
-			if (imagetype)
-				free(imagetype);
-			imagetype = strdup(optarg);
+			imagetype = optarg;
 			break;
 		case 'x':
 			xml_mode = 1;
@@ -122,20 +133,14 @@ static void parse_opts(int argc, char **argv)
 		case 'd':
 			idevice_set_debug_level(1);
 			break;
+		case 'v':
+			printf("%s %s\n", TOOL_NAME, PACKAGE_VERSION);
+			exit(0);
 		default:
-			print_usage(argc, argv);
+			print_usage(argc, argv, 1);
 			exit(2);
 		}
 	}
-}
-
-static void print_xml(plist_t node)
-{
-	char *xml = NULL;
-	uint32_t len = 0;
-	plist_to_xml(node, &xml, &len);
-	if (xml)
-		puts(xml);
 }
 
 static ssize_t mim_upload_cb(void* buf, size_t size, void* userdata)
@@ -180,12 +185,16 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (IDEVICE_E_SUCCESS != idevice_new(&device, udid)) {
-		printf("No device found, is it plugged in?\n");
+	if (IDEVICE_E_SUCCESS != idevice_new_with_options(&device, udid, (use_network) ? IDEVICE_LOOKUP_NETWORK : IDEVICE_LOOKUP_USBMUX)) {
+		if (udid) {
+			printf("No device found with udid %s.\n", udid);
+		} else {
+			printf("No device found.\n");
+		}
 		return -1;
 	}
 
-	if (LOCKDOWN_E_SUCCESS != (ldret = lockdownd_client_new_with_handshake(device, &lckd, "ideviceimagemounter"))) {
+	if (LOCKDOWN_E_SUCCESS != (ldret = lockdownd_client_new_with_handshake(device, &lckd, TOOL_NAME))) {
 		printf("ERROR: Could not connect to lockdown, error code %d.\n", ldret);
 		goto leave;
 	}
@@ -203,6 +212,20 @@ int main(int argc, char **argv)
 		if (sscanf(product_version, "%d.%d.%*d", &product_version_major, &product_version_minor) == 2) {
 			if (product_version_major >= 7)
 				disk_image_upload_type = DISK_IMAGE_UPLOAD_TYPE_UPLOAD_IMAGE;
+		}
+	}
+
+	if (product_version_major == 16) {
+		uint8_t dev_mode_status = 0;
+		plist_t val = NULL;
+		ldret = lockdownd_get_value(lckd, "com.apple.security.mac.amfi", "DeveloperModeStatus", &val);
+		if (ldret == LOCKDOWN_E_SUCCESS) {
+			plist_get_bool_val(val, &dev_mode_status);
+			plist_free(val);
+		}
+		if (!dev_mode_status) {
+			printf("ERROR: You have to enable Developer Mode on the given device in order to allowing mounting a developer disk image.\n");
+			goto leave;
 		}
 	}
 
@@ -260,17 +283,12 @@ int main(int argc, char **argv)
 	if (list_mode) {
 		/* list mounts mode */
 		if (!imagetype) {
-			imagetype = strdup("Developer");
+			imagetype = "Developer";
 		}
 		err = mobile_image_mounter_lookup_image(mim, imagetype, &result);
-		free(imagetype);
 		if (err == MOBILE_IMAGE_MOUNTER_E_SUCCESS) {
 			res = 0;
-			if (xml_mode) {
-				print_xml(result);
-			} else {
-				plist_print_to_stream(result, stdout);
-			}
+			plist_write_to_stream(result, stdout, (xml_mode) ? PLIST_FORMAT_XML : PLIST_FORMAT_LIMD, 0);
 		} else {
 			printf("Error: lookup_image returned %d\n", err);
 		}
@@ -308,7 +326,7 @@ int main(int argc, char **argv)
 
 
 		if (!imagetype) {
-			imagetype = strdup("Developer");
+			imagetype = "Developer";
 		}
 
 		switch(disk_image_upload_type) {
@@ -386,7 +404,6 @@ int main(int argc, char **argv)
 
 		printf("Mounting...\n");
 		err = mobile_image_mounter_mount_image(mim, mountname, sig, sig_length, imagetype, &result);
-		free(imagetype);
 		if (err == MOBILE_IMAGE_MOUNTER_E_SUCCESS) {
 			if (result) {
 				plist_t node = plist_dict_get_item(result, "Status");
@@ -399,20 +416,12 @@ int main(int argc, char **argv)
 							res = 0;
 						} else {
 							printf("unexpected status value:\n");
-							if (xml_mode) {
-								print_xml(result);
-							} else {
-								plist_print_to_stream(result, stdout);
-							}
+							plist_write_to_stream(result, stdout, (xml_mode) ? PLIST_FORMAT_XML : PLIST_FORMAT_LIMD, 0);
 						}
 						free(status);
 					} else {
 						printf("unexpected result:\n");
-						if (xml_mode) {
-							print_xml(result);
-						} else {
-							plist_print_to_stream(result, stdout);
-						}
+						plist_write_to_stream(result, stdout, (xml_mode) ? PLIST_FORMAT_XML : PLIST_FORMAT_LIMD, 0);
 					}
 				}
 				node = plist_dict_get_item(result, "Error");
@@ -424,19 +433,11 @@ int main(int argc, char **argv)
 						free(error);
 					} else {
 						printf("unexpected result:\n");
-						if (xml_mode) {
-							print_xml(result);
-						} else {
-							plist_print_to_stream(result, stdout);
-						}
+						plist_write_to_stream(result, stdout, (xml_mode) ? PLIST_FORMAT_XML : PLIST_FORMAT_LIMD, 0);
 					}
 
 				} else {
-					if (xml_mode) {
-						print_xml(result);
-					} else {
-						plist_print_to_stream(result, stdout);
-					}
+					plist_write_to_stream(result, stdout, (xml_mode) ? PLIST_FORMAT_XML : PLIST_FORMAT_LIMD, 0);
 				}
 			}
 		} else {
